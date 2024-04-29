@@ -2,3 +2,8 @@
 /docs.gl
 
 index.json
+
+.gitignore
+index-big.json
+
+/small

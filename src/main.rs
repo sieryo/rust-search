@@ -5,10 +5,10 @@ use std::{
     io,
     path::{Path, PathBuf},
     process::ExitCode,
+    str::from_utf8,
 };
+use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use xml::reader::{EventReader, XmlEvent};
-use tiny_http::{Response, Server};
-
 
 #[derive(Debug)]
 struct Lexer<'a> {
@@ -42,7 +42,7 @@ impl<'a> Lexer<'a> {
         return self.chop(n);
     }
 
-    fn next_token(&mut self) -> Option<&'a [char]> {
+    fn next_token(&mut self) -> Option<String> {
         self.trim_left();
 
         if self.content.len() == 0 {
@@ -50,19 +50,19 @@ impl<'a> Lexer<'a> {
         }
 
         if self.content[0].is_numeric() {
-            return Some(self.chop_while(|c| c.is_numeric()));
+            return Some(self.chop_while(|c| c.is_numeric()).iter().collect());
         }
 
         if self.content[0].is_alphabetic() {
-            return Some(self.chop_while(|c| c.is_alphanumeric()));
+            return Some(self.chop_while(|c| c.is_alphanumeric()).iter().collect());
         }
 
-        return Some(self.chop(1));
+        return Some(self.chop(1).iter().collect());
     }
 }
 
 impl<'a> Iterator for Lexer<'a> {
-    type Item = &'a [char];
+    type Item = String;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next_token()
@@ -97,12 +97,107 @@ fn usage(command: &str) -> () {
     eprintln!("Penggunaan {command} [SUBCOMMAND] [OPTIONS]");
     eprintln!("Subcommands");
     eprintln!(
-        "      index <folder>           Index <folder> nya dan menyimpan indexnya ke index.json"
+        "      index <folder>                Index <folder> nya dan menyimpan indexnya ke index.json"
     );
-    eprintln!("      search <index-file>      Mengecek seberapa banyak dokumen yang diindex didalam file tersebut ");
+    eprintln!("      search <index-file>     Mengecek seberapa banyak dokumen yang diindex didalam file tersebut ");
     eprintln!(
-        "      serve                    Menjalankan local http server dengan tampilan website  "
+        "      serve <index-file>            Menjalankan local http server dengan tampilan website  "
     );
+}
+
+fn serve_static_file(request: Request, file_path: &str, content_type: &str) -> Result<(), ()> {
+    let header_content_type = Header::from_bytes("Content-Type", content_type).expect("Error wir");
+    let file = File::open(file_path).map_err(|err| {
+        eprintln!("ERROR: tidak bisa mengirim file {file_path} karena error: {err}");
+    })?;
+
+    let response = Response::from_file(file).with_header(header_content_type);
+    request
+        .respond(response)
+        .map_err(|_| eprintln!("ERROR: Tidak dapat mengirim response"))?;
+
+    Ok(())
+}
+
+fn serve_404(request: Request) -> Result<(), ()> {
+    request
+        .respond(Response::from_string("404").with_status_code(StatusCode(404)))
+        .map_err(|err| {
+            eprintln!("Tidak bisa mengirim response : {err}");
+        })
+}
+
+fn tf(t: &str, tf_table: &TermFreq) -> f32 {
+    let a = tf_table.get(t).cloned().unwrap_or(0) as f32;
+    let b = tf_table.iter().map(|(_, f)| *f).sum::<usize>() as f32;
+
+    a / b
+}
+
+fn idf(t: &str, corpus: &TermFreqIndex) -> f32 {
+    let n = corpus.len() as f32;
+    let mut total_count_for_term_in_document = 0f32;
+
+    for (_, tf_table) in corpus {
+        tf_table
+            .contains_key(t)
+            .then(|| total_count_for_term_in_document += 1f32);
+    }
+    // println!("{} {}", n, total_count_for_term_in_document.max(1f32));
+    (n / total_count_for_term_in_document.max(1f32)).log2()
+}
+
+fn serve_request(tf_index: &TermFreqIndex, mut request: Request) -> Result<(), ()> {
+    println!(
+        "INFO: mendapatkan request. method: {:?}, url: {:?}",
+        request.method(),
+        request.url()
+    );
+
+    match (request.method(), request.url()) {
+        (Method::Post, "/api/search") => {
+            let mut buf = Vec::new();
+            request.as_reader().read_to_end(&mut buf);
+            let query = from_utf8(&buf)
+                .map_err(|err| {
+                    eprintln!("ERROR: Tidak dapat menghasilkan string query: {err}");
+                })?
+                .to_lowercase()
+                .chars()
+                .collect::<Vec<_>>();
+
+            let mut rank_tf: Vec<(&Path, f32)> = Vec::new();
+            for (path, tf_table) in tf_index {
+                let mut rank = 0f32;
+                // println!("{path}", path = path.display());
+                for term in Lexer::new(&query) {
+                    let idf = idf(&term, &tf_index);
+                    let tfidf = tf(&term, &tf_table) * idf;
+                    // println!("      tfidf untuk {term} => {tfidf}");
+                    rank += tfidf;
+                }
+                rank_tf.push((&path, rank));
+            }
+
+            rank_tf.sort_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
+            rank_tf.reverse();
+
+            for (path, total_tf) in rank_tf.iter().take(10) {
+                println!("path : {path} => {total_tf}", path = path.display())
+            }
+
+            request.respond(Response::from_string("ok")).map_err(|err| {
+                eprintln!("ERROR: tidak dapat mengirim respon");
+            })
+        }
+        (Method::Get, "/") | (Method::Get, "/index.html") => {
+            serve_static_file(request, "index.html", "text/html; charset=utf-8")
+        }
+        (Method::Get, "/index.js") => {
+            serve_static_file(request, "index.js", "text/javascript; charset=utf-8")
+        }
+        _ => serve_404(request),
+    }
 }
 
 fn entry() -> Result<(), ()> {
@@ -142,7 +237,7 @@ fn entry() -> Result<(), ()> {
                     println!("Getting data from {}...", index_path);
                     let tf_index: TermFreqIndex = serde_json::from_reader(&file).unwrap();
                     println!(
-                        "Mengecek total index dari {} yang ada : {}",
+                        "Mengecek total file dari {} yang ada : {}",
                         index_path,
                         tf_index.len()
                     );
@@ -154,6 +249,17 @@ fn entry() -> Result<(), ()> {
             }
         }
         "serve" => {
+            let index_path = args.next().ok_or_else(|| {
+                usage(&program);
+                eprintln!("ERROR: tidak ada index yang diberi");
+            })?;
+
+            let index_file = File::open(&index_path).map_err(|err| {
+                eprintln!("ERROR: Index file : {err}");
+            })?;
+
+            let mut tf_index: TermFreqIndex = serde_json::from_reader(&index_file).unwrap();
+
             let server = Server::http("127.0.0.1:3000").map_err(|err| {
                 eprintln!("ERROR: tidak bisa menjalankan HTTP server dengan error : {err}");
             })?;
@@ -161,11 +267,7 @@ fn entry() -> Result<(), ()> {
             println!("INFO: listening at http://127.0.0.1:3000");
 
             for request in server.incoming_requests() {
-                println!("INFO: mendapatkan request. method: {:?}, url: {:?}", request.method(), request.url());
-                let response = Response::from_string("hello");
-                request.respond(response).unwrap_or_else(|_| {
-                    eprintln!("Tidak bisa mengirim response")
-                });
+                serve_request(&mut tf_index, request)?;
             }
 
             todo!("Not implemented");
@@ -206,9 +308,7 @@ fn index_file(path: &PathBuf) -> Option<TermFreq> {
 
                 println!("Indexing {:?}....", path);
 
-                for token in Lexer::new(&content) {
-                    let term = token.iter().collect::<String>().to_lowercase();
-
+                for term in Lexer::new(&content) {
                     if let Some(freq) = tf.get_mut(&term) {
                         *freq += 1;
                     } else {
