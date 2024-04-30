@@ -17,10 +17,10 @@ pub struct Model {
     pub df: DocFreq,
 }
 
-pub fn calculate_tf(t: &str, count_total_term_in_doc: &(usize, TermFreq)) -> f32 {
-    let count_term_in_doc = count_total_term_in_doc.1.get(t).cloned().unwrap_or(0) as f32;
+pub fn calculate_tf(t: &str, count_all_term_tf_table: &(usize, TermFreq)) -> f32 {
+    let count_term_in_doc = count_all_term_tf_table.1.get(t).cloned().unwrap_or(0) as f32;
 
-    count_term_in_doc / count_total_term_in_doc.0 as f32
+    count_term_in_doc / count_all_term_tf_table.0 as f32
 }
 
 pub fn calculate_idf(t: &str, n: usize, df: &DocFreq) -> f32 {
@@ -132,16 +132,15 @@ fn index_file(path: &PathBuf, model: &mut Model) -> Option<(usize, TermFreq)> {
 
                 let mut tf = TermFreq::new();
 
-
+                let mut total_count_term_in_doc = 0;
                 for term in Lexer::new(&content) {
                     if let Some(freq) = tf.get_mut(&term) {
                         *freq += 1;
                     } else {
                         tf.insert(term, 1);
                     }
+                    total_count_term_in_doc += 1;
                 }
-
-                let total_count_term_in_doc = tf.iter().map(|(_, f)| *f).sum::<usize>();
 
                 for t in tf.keys() {
                     if let Some(freq) = model.df.get_mut(t) {
@@ -177,12 +176,12 @@ pub fn index_all_folder(path: PathBuf, model: &mut Model) -> io::Result<()> {
 pub fn search_query<'a>(model: &'a Model, query: &'a [char]) -> Vec<(&'a Path, f32)> {
     let mut rank_tf: Vec<(&Path, f32)> = Vec::new();
     // Mengecek semua isinya (corpust)
-    for (path, tf_table) in model.tfpd.iter() {
+    for (path, count_all_term_tf_table) in model.tfpd.iter() {
         // Untuk setiap path dan tf_table (document) yang sudah dijadikan unique.
         let mut rank = 0f32;
         for term in Lexer::new(&query) {
             let idf = calculate_idf(&term,model.tfpd.len(), &model.df);
-            let tfidf = calculate_tf(&term, &tf_table) * idf;
+            let tfidf = calculate_tf(&term, &count_all_term_tf_table) * idf;
             rank += tfidf;
         }
         rank_tf.push((&path, rank));
