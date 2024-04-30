@@ -41,7 +41,7 @@ fn entry() -> Result<(), ()> {
 
             let mut model = Model::default();
 
-            model::index_all_folder(PathBuf::from(dir_path), &mut model);
+            let _ = model::index_all_folder(PathBuf::from(dir_path), &mut model);
 
             // Save
             let index_path = "index.json";
@@ -59,7 +59,7 @@ fn entry() -> Result<(), ()> {
             match index_file {
                 Ok(file) => {
                     println!("Getting data from {}...", index_path);
-                    let model: Model = serde_json::from_reader(&file).unwrap();
+                    let _: Model = serde_json::from_reader(&file).unwrap();
                     println!(
                         "Mengecek total file dari {} yang ada : {}",
                         index_path,
