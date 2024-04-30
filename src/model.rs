@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 pub type DocFreq = HashMap<String, usize>;
 pub type TermFreq = HashMap<String, usize>;
-pub type TermFreqPerDoc = HashMap<PathBuf, TermFreq>;
+pub type TermFreqPerDoc = HashMap<PathBuf, (usize,TermFreq)>;
 
 #[derive(Serialize, Deserialize, Default, Debug)]
 pub struct Model {
@@ -17,11 +17,10 @@ pub struct Model {
     pub df: DocFreq,
 }
 
-pub fn calculate_tf(t: &str, tf_table: &TermFreq) -> f32 {
-    let a = tf_table.get(t).cloned().unwrap_or(0) as f32;
-    let b = tf_table.iter().map(|(_, f)| *f).sum::<usize>() as f32;
+pub fn calculate_tf(t: &str, count_total_term_in_doc: &(usize, TermFreq)) -> f32 {
+    let count_term_in_doc = count_total_term_in_doc.1.get(t).cloned().unwrap_or(0) as f32;
 
-    a / b
+    count_term_in_doc / count_total_term_in_doc.0 as f32
 }
 
 pub fn calculate_idf(t: &str, n: usize, df: &DocFreq) -> f32 {
@@ -120,7 +119,7 @@ fn index_folder(path: &PathBuf, model: &mut Model) {
     }
 }
 
-fn index_file(path: &PathBuf, model: &mut Model) -> Option<TermFreq> {
+fn index_file(path: &PathBuf, model: &mut Model) -> Option<(usize, TermFreq)> {
     match path.extension() {
         Some(e) => {
             if e == "xhtml" {
@@ -142,6 +141,8 @@ fn index_file(path: &PathBuf, model: &mut Model) -> Option<TermFreq> {
                     }
                 }
 
+                let total_count_term_in_doc = tf.iter().map(|(_, f)| *f).sum::<usize>();
+
                 for t in tf.keys() {
                     if let Some(freq) = model.df.get_mut(t) {
                         *freq += 1
@@ -150,7 +151,7 @@ fn index_file(path: &PathBuf, model: &mut Model) -> Option<TermFreq> {
                     }
                 }
 
-                Some(tf)
+                Some((total_count_term_in_doc,tf))
             } else {
                 return None;
             }
