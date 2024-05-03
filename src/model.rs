@@ -84,29 +84,33 @@ impl Model {
         DocumentState::ADD
     }
 
-    fn update_document(&mut self, path: &PathBuf, current_last_modified: SystemTime) -> Option<Document> {
+    fn update_document(
+        &mut self,
+        path: &PathBuf,
+        current_last_modified: SystemTime,
+    ) -> Option<Document> {
         let last_doc = self.docs.remove(path).unwrap();
-        let new_doc = calculate_document_by_extension(path);
 
         for t in last_doc.tf.keys() {
             if let Some(freq) = self.df.get_mut(t) {
                 *freq -= 1
             }
         }
-
-        for t in new_doc.1.keys() {
-            if let Some(freq) = self.df.get_mut(t) {
-                *freq += 1
-            } else {
-                self.df.insert(t.to_string(), 1);
+        if let Some(new_doc) = calculate_document_by_extension(path) {
+            for t in new_doc.1.keys() {
+                if let Some(freq) = self.df.get_mut(t) {
+                    *freq += 1
+                } else {
+                    self.df.insert(t.to_string(), 1);
+                }
             }
+            println!("Re-Index: {:?} -> SELESAI", path);
+
+            let document = Document::new(new_doc.1, new_doc.0, current_last_modified);
+            return Some(document);
+        } else {
+            None
         }
-
-        let document =
-        Document::new(new_doc.1, new_doc.0, current_last_modified);
-
-    return Some(document);
-
     }
 
     fn index_file(&mut self, path: &PathBuf) -> Option<Document> {
@@ -115,29 +119,31 @@ impl Model {
 
         match document_state {
             DocumentState::ADD => {
-                let doc = calculate_document_by_extension(&path);
-                println!("Index: {:?} -> SELESAI", path);
-
-                // Kata-kata yang ada didokumen, jika ada kata tersebut, maka tambahkan 1. Misal file ada 500 dan kata "turu" muncul 100 di 500 dokumen tersebut, maka turu akan bernilai 100.
-                for t in doc.1.keys() {
-                    if let Some(freq) = self.df.get_mut(t) {
-                        *freq += 1
-                    } else {
-                        self.df.insert(t.to_string(), 1);
+                if let Some(doc) = calculate_document_by_extension(&path) {
+                    println!("Index: {:?} -> SELESAI", path);
+                    // Kata-kata yang ada didokumen, jika ada kata tersebut, maka tambahkan 1. Misal file ada 500 dan kata "turu" muncul 100 di 500 dokumen tersebut, maka turu akan bernilai 100.
+                    for t in doc.1.keys() {
+                        if let Some(freq) = self.df.get_mut(t) {
+                            *freq += 1
+                        } else {
+                            self.df.insert(t.to_string(), 1);
+                        }
                     }
-                }
-                let document = Document::new(doc.1, doc.0, current_last_modified);
+                    let document = Document::new(doc.1, doc.0, current_last_modified);
 
-                return Some(document)
+                    return Some(document);
+                } else {
+                    None
+                }
             }
             DocumentState::STABLE => {
-                println!("File {path} belum diupdate. Tidak di-index ulang.", path = path.display());
-                return None
+                // println!(
+                //     "File {path} belum diupdate. Tidak di-index ulang.",
+                //     path = path.display()
+                // );
+                return None;
             }
-            DocumentState::UPDATE => {
-                
-                return self.update_document(&path, current_last_modified)
-            }
+            DocumentState::UPDATE => return self.update_document(&path, current_last_modified),
         }
     }
     pub fn save_model_to_json_file(&mut self, path: &str) -> Result<(), ()> {
@@ -164,24 +170,24 @@ fn table_and_count_term_freq(content: Vec<char>) -> (usize, TermFreq) {
 
     (total_count_term_in_doc, tf)
 }
-fn calculate_document_by_extension(path: &PathBuf) -> (usize, HashMap<String, usize>) {
-    match path.extension().unwrap().to_str().unwrap() {
-        "xhtml" => {
-            let content = lexer::parse_entire_xml_file(&path)
-            .unwrap()
-            .to_lowercase()
-            .chars()
-            .collect::<Vec<_>>();
-        let result = table_and_count_term_freq(content);
-    
-        result
-        }
-        _ => {
-            todo!("test")
-        }
-    }
+fn calculate_document_by_extension(path: &PathBuf) -> Option<(usize, HashMap<String, usize>)> {
+    match path.extension() {
+        Some(ext) => {
+            if ext == "xhtml" {
+                let content = lexer::parse_entire_xml_file(&path)
+                    .unwrap()
+                    .to_lowercase()
+                    .chars()
+                    .collect::<Vec<_>>();
+                let result = table_and_count_term_freq(content);
 
-    
+                return Some(result);
+            } else {
+                None
+            }
+        }
+        None => None,
+    }
 }
 
 pub fn calculate_tf(t: &str, document: &Document) -> f32 {
