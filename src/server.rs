@@ -1,4 +1,4 @@
-use std::{fs::File, io, str::from_utf8};
+use std::{fs::File, io, str::from_utf8, sync::Mutex};
 
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
@@ -18,7 +18,8 @@ fn serve_404(request: Request) -> io::Result<()> {
         .respond(Response::from_string("404").with_status_code(StatusCode(404)))
 }
 
-fn serve_api_search(mut request:Request, model: &Model) -> io::Result<()> {
+fn serve_api_search(mut request:Request, model: &Mutex<Model>) -> io::Result<()> {
+    let model = model.lock().unwrap();
     let mut buf = Vec::new();
 
     if let Err(err) = request.as_reader().read_to_end(&mut buf) {
@@ -49,7 +50,7 @@ fn serve_api_search(mut request:Request, model: &Model) -> io::Result<()> {
     request.respond(Response::from_string(respond))
 }
 
-fn serve_request(model: &Model, request: Request) -> io::Result<()> {
+fn serve_request(model: &Mutex<Model>, request: Request) -> io::Result<()> {
     println!(
         "INFO: mendapatkan request. method: {:?}, url: {:?}",
         request.method(),
@@ -69,7 +70,7 @@ fn serve_request(model: &Model, request: Request) -> io::Result<()> {
     }
 }
 
-pub fn begin_server(model: &Model) -> Result<(), ()> {
+pub fn begin_server(model: &Mutex<Model>) -> Result<(), ()> {
     let server = Server::http("127.0.0.1:3000").map_err(|_| {
         eprintln!("ERROR: tidak bisa menjalankan http server..");
     })?;
