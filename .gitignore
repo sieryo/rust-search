@@ -1,9 +1,11 @@
-/target
-/docs.gl
+target
+docs.gl
 
 index.json
 
-.gitignore
+gitignore
 index-big.json
+snowball
+snowball-data
 
 /small

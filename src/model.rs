@@ -1,26 +1,169 @@
-use std::{
-    fs::{self, File},
-    io::{self, BufReader},
-    path::{Path, PathBuf},
-};
-use serde::{Serialize, Deserialize};
-use xml::{reader::XmlEvent, EventReader};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io::BufWriter;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use crate::lexer::{self, Lexer};
 
 pub type DocFreq = HashMap<String, usize>;
 pub type TermFreq = HashMap<String, usize>;
-pub type TermFreqPerDoc = HashMap<PathBuf, (usize,TermFreq)>;
+pub type Docs = HashMap<PathBuf, Document>;
 
-#[derive(Serialize, Deserialize, Default, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Document {
+    pub tf: TermFreq,
+    count: usize,
+    pub last_modified: SystemTime,
+}
+
+impl Document {
+    pub fn new(tf: TermFreq, count: usize, last_modified: SystemTime) -> Self {
+        Self {
+            tf,
+            count,
+            last_modified,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Model {
-    pub tfpd: TermFreqPerDoc,
+    // Term frekuensi untuk satu dokumen disatukan disini
+    pub docs: Docs,
+    // Total kemunculan semua kata di corpus
     pub df: DocFreq,
 }
 
-pub fn calculate_tf(t: &str, count_all_term_tf_table: &(usize, TermFreq)) -> f32 {
-    let count_term_in_doc = count_all_term_tf_table.1.get(t).cloned().unwrap_or(0) as f32;
+impl Model {
+    pub fn new() -> Self {
+        Self {
+            docs: HashMap::new(),
+            df: HashMap::new(),
+        }
+    }
+    pub fn begin_index(&mut self, path: PathBuf) {
+        if path.is_file() {
+            if let Some(tf) = self.index_file(&path) {
+                self.docs.insert(path, tf);
+            }
+        } else {
+            self.index_folder(&path);
+        }
+    }
+    fn index_folder(&mut self, path: &PathBuf) {
+        let dir = fs::read_dir(&path).unwrap();
+        for entry in dir {
+            let path = entry.unwrap().path();
 
-    count_term_in_doc / count_all_term_tf_table.0 as f32
+            if path.is_dir() {
+                self.index_folder(&path);
+            } else {
+                if let Some(tf) = self.index_file(&path) {
+                    self.docs.insert(path, tf);
+                }
+            }
+        }
+    }
+
+    fn index_file(&mut self, path: &PathBuf) -> Option<Document> {
+        match path.extension() {
+            Some(e) => {
+                if e == "xhtml" {
+                    let current_last_modified = path.metadata().unwrap().modified().unwrap();
+                    // Jika ada model yang diperbaharui, maka perbaharui indexnya.
+                    if let Some(last_doc) = self.docs.get(path) {
+                        if last_doc.last_modified < current_last_modified {
+                            let new_doc = calculate_document(path);
+                            println!("Re-index: {:?} -> SELESAI", path);
+                            // Mengurangi frekuensi dari kata yang ada di dokumen terakhir sebelum update di corpus (bag of words).
+                            for t in last_doc.tf.keys() {
+                                if let Some(freq) = self.df.get_mut(t) {
+                                    *freq -= 1
+                                }
+                            }
+                            for t in new_doc.1.keys() {
+                                if let Some(freq) = self.df.get_mut(t) {
+                                    *freq += 1
+                                } else {
+                                    self.df.insert(t.to_string(), 1);
+                                }
+                            }
+                            let document =
+                                Document::new(new_doc.1, new_doc.0, current_last_modified);
+
+                            return Some(document);
+                        } else {
+                            // println!("File sudah di index dan belum ada update: {path}", path = path.display());
+                            None
+                        }
+                    } else {
+                        let doc = calculate_document(&path);
+                        println!("Index: {:?} -> SELESAI", path);
+
+                        // Kata-kata yang ada didokumen, jika ada kata tersebut, maka tambahkan 1. Misal file ada 500 dan kata "turu" muncul 100 di 500 dokumen tersebut, maka turu akan bernilai 100.
+                        for t in doc.1.keys() {
+                            if let Some(freq) = self.df.get_mut(t) {
+                                *freq += 1
+                            } else {
+                                self.df.insert(t.to_string(), 1);
+                            }
+                        }
+                        let document = Document::new(doc.1, doc.0, current_last_modified);
+
+                        Some(document)
+                    }
+                } else if e == "txt" {
+                    return None;
+                } else {
+                    return None;
+                }
+            }
+            None => {
+                return None;
+            }
+        }
+    }
+    pub fn save_model_to_json_file(&mut self, path: &str) -> Result<(), ()> {
+        // Save
+        let index_file = File::create(&path).unwrap();
+        println!("Saving data to {path}...");
+        serde_json::to_writer(BufWriter::new(index_file), self)
+            .map_err(|err| eprintln!("ERROR: Tidak dapat save file ke json : {err}"))
+    }
+}
+
+fn table_and_count_term_freq(content: Vec<char>) -> (usize, TermFreq) {
+    let mut tf = TermFreq::new();
+
+    let mut total_count_term_in_doc = 0;
+    for term in Lexer::new(&content) {
+        if let Some(freq) = tf.get_mut(&term) {
+            *freq += 1;
+        } else {
+            tf.insert(term, 1);
+        }
+        total_count_term_in_doc += 1;
+    }
+
+    (total_count_term_in_doc, tf)
+}
+fn calculate_document(path: &PathBuf) -> (usize, HashMap<String, usize>) {
+    let content = lexer::parse_entire_xml_file(&path)
+        .unwrap()
+        .to_lowercase()
+        .chars()
+        .collect::<Vec<_>>();
+    let result = table_and_count_term_freq(content);
+
+    result
+}
+
+pub fn calculate_tf(t: &str, document: &Document) -> f32 {
+    let count_term_in_doc = document.tf.get(t).cloned().unwrap_or(0) as f32;
+
+    count_term_in_doc / document.count as f32
 }
 
 pub fn calculate_idf(t: &str, n: usize, df: &DocFreq) -> f32 {
@@ -31,156 +174,14 @@ pub fn calculate_idf(t: &str, n: usize, df: &DocFreq) -> f32 {
     (n / total_count_for_term_in_document.max(1f32)).log2()
 }
 
-#[derive(Debug)]
-pub struct Lexer<'a> {
-    content: &'a [char],
-}
-
-impl<'a> Lexer<'a> {
-    pub fn new(content: &'a [char]) -> Self {
-        Self { content }
-    }
-    fn trim_left(&mut self) {
-        while self.content.len() > 0 && self.content[0].is_whitespace() {
-            self.content = &self.content[1..];
-        }
-    }
-
-    fn chop(&mut self, n: usize) -> &'a [char] {
-        let token = &self.content[0..n];
-        self.content = &self.content[n..];
-        &token
-    }
-
-    fn chop_while<P>(&mut self, mut predicate: P) -> &'a [char]
-    where
-        P: FnMut(&char) -> bool,
-    {
-        let mut n = 0;
-        while n < self.content.len() && predicate(&self.content[n]) {
-            n += 1;
-        }
-        return self.chop(n);
-    }
-
-    fn next_token(&mut self) -> Option<String> {
-        self.trim_left();
-
-        if self.content.len() == 0 {
-            return None;
-        }
-
-        if self.content[0].is_numeric() {
-            return Some(self.chop_while(|c| c.is_numeric()).iter().collect());
-        }
-
-        if self.content[0].is_alphabetic() {
-            return Some(self.chop_while(|c| c.is_alphanumeric()).iter().collect());
-        }
-
-        return Some(self.chop(1).iter().collect());
-    }
-}
-
-impl<'a> Iterator for Lexer<'a> {
-    type Item = String;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.next_token()
-    }
-}
-
-pub fn parse_entire_xml_file<P: AsRef<Path>>(file_path: P) -> io::Result<String> {
-    let file = File::open(file_path)?;
-    let er = EventReader::new(BufReader::new(file));
-
-    let mut content = String::new();
-    for event in er.into_iter() {
-        if let XmlEvent::Characters(text) = event.expect("TODO") {
-            content.push_str(&text);
-            content.push_str(" ");
-        }
-    }
-    Ok(content)
-}
-
-fn index_folder(path: &PathBuf, model: &mut Model) {
-    let dir = fs::read_dir(&path).unwrap();
-    for entry in dir {
-        let path = entry.unwrap().path();
-
-        if path.is_dir() {
-            index_folder(&path, model);
-        } else {
-            if let Some(tf) = index_file(&path, model) {
-                model.tfpd.insert(path, tf);
-            }
-        }
-    }
-}
-
-fn index_file(path: &PathBuf, model: &mut Model) -> Option<(usize, TermFreq)> {
-    match path.extension() {
-        Some(e) => {
-            if e == "xhtml" {
-                println!("Indexing {:?}....", path);
-                let content = parse_entire_xml_file(&path)
-                    .unwrap()
-                    .to_lowercase()
-                    .chars()
-                    .collect::<Vec<_>>();
-
-                let mut tf = TermFreq::new();
-
-                let mut total_count_term_in_doc = 0;
-                for term in Lexer::new(&content) {
-                    if let Some(freq) = tf.get_mut(&term) {
-                        *freq += 1;
-                    } else {
-                        tf.insert(term, 1);
-                    }
-                    total_count_term_in_doc += 1;
-                }
-
-                for t in tf.keys() {
-                    if let Some(freq) = model.df.get_mut(t) {
-                        *freq += 1
-                    }else {
-                        model.df.insert(t.to_string(), 1);
-                    }
-                }
-
-                Some((total_count_term_in_doc,tf))
-            } else {
-                return None;
-            }
-        }
-        None => {
-            return None;
-        }
-    }
-}
-
-pub fn index_all_folder(path: PathBuf, model: &mut Model) -> io::Result<()> {
-    if path.is_file() {
-        if let Some(tf) = index_file(&path, model) {
-            model.tfpd.insert(path, tf);
-        }
-        return Ok(());
-    }
-
-    index_folder(&path, model);
-    Ok(())
-}
-
 pub fn search_query<'a>(model: &'a Model, query: &'a [char]) -> Vec<(&'a Path, f32)> {
     let mut rank_tf: Vec<(&Path, f32)> = Vec::new();
     // Mengecek semua isinya (corpust)
-    for (path, count_all_term_tf_table) in model.tfpd.iter() {
+    for (path, count_all_term_tf_table) in model.docs.iter() {
         // Untuk setiap path dan tf_table (document) yang sudah dijadikan unique.
         let mut rank = 0f32;
         for term in Lexer::new(&query) {
-            let idf = calculate_idf(&term,model.tfpd.len(), &model.df);
+            let idf = calculate_idf(&term, model.docs.len(), &model.df);
             let tfidf = calculate_tf(&term, &count_all_term_tf_table) * idf;
             rank += tfidf;
         }
