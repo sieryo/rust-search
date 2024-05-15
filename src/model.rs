@@ -3,28 +3,45 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::SystemTime;
 
 use crate::lexer::{self, Lexer};
 
 pub type DocFreq = HashMap<String, usize>;
 pub type TermFreq = HashMap<String, usize>;
-pub type Docs = HashMap<PathBuf, Document>;
+pub type Docs = HashMap<PathBuf, Doc>;
 
 enum DocumentState {
     UPDATE,
     STABLE,
     ADD,
 }
+#[derive(Debug, Clone)]
+pub struct CountCheck {
+    pub add: usize,
+    pub stable: usize,
+    pub update:usize
+}
+
+impl CountCheck {
+    fn new() -> Self {
+        Self {
+            add: 0,
+            stable: 0,
+            update: 0
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct Document {
+pub struct Doc {
     pub tf: TermFreq,
     count: usize,
     pub last_modified: SystemTime,
 }
 
-impl Document {
+impl Doc {
     pub fn new(tf: TermFreq, count: usize, last_modified: SystemTime) -> Self {
         Self {
             tf,
@@ -49,29 +66,6 @@ impl Model {
             df: HashMap::new(),
         }
     }
-    pub fn begin_index(&mut self, path: PathBuf) {
-        if path.is_file() {
-            if let Some(tf) = self.index_file(&path) {
-                self.docs.insert(path, tf);
-            }
-        } else {
-            self.index_folder(&path);
-        }
-    }
-    fn index_folder(&mut self, path: &PathBuf) {
-        let dir = fs::read_dir(&path).unwrap();
-        for entry in dir {
-            let path = entry.unwrap().path();
-
-            if path.is_dir() {
-                self.index_folder(&path);
-            } else {
-                if let Some(tf) = self.index_file(&path) {
-                    self.docs.insert(path, tf);
-                }
-            }
-        }
-    }
 
     fn check_document(&self, path: &PathBuf, current_last_modified: SystemTime) -> DocumentState {
         if let Some(doc) = self.docs.get(path) {
@@ -84,20 +78,16 @@ impl Model {
         DocumentState::ADD
     }
 
-    fn update_document(
-        &mut self,
-        path: &PathBuf,
-        current_last_modified: SystemTime,
-    ) -> Option<Document> {
-        let last_doc = self.docs.remove(path).unwrap();
+    fn update_document(&mut self, path: PathBuf, current_last_modified: SystemTime) {
+        let last_doc = self.docs.remove(&path).unwrap();
 
         for t in last_doc.tf.keys() {
             if let Some(freq) = self.df.get_mut(t) {
                 *freq -= 1
             }
         }
-        if let Some(new_doc) = calculate_document_by_extension(path) {
-            for t in new_doc.1.keys() {
+        if let Some(new_doc) = calculate_document_by_extension(&path, current_last_modified) {
+            for t in new_doc.tf.keys() {
                 if let Some(freq) = self.df.get_mut(t) {
                     *freq += 1
                 } else {
@@ -106,52 +96,75 @@ impl Model {
             }
             println!("Re-Index: {:?} -> SELESAI", path);
 
-            let document = Document::new(new_doc.1, new_doc.0, current_last_modified);
-            return Some(document);
+            self.docs.insert(path, new_doc);
         } else {
-            None
         }
     }
-
-    fn index_file(&mut self, path: &PathBuf) -> Option<Document> {
-        let current_last_modified = path.metadata().unwrap().modified().unwrap();
-        let document_state = self.check_document(path, current_last_modified);
-
-        match document_state {
-            DocumentState::ADD => {
-                if let Some(doc) = calculate_document_by_extension(&path) {
-                    println!("Index: {:?} -> SELESAI", path);
-                    // Kata-kata yang ada didokumen, jika ada kata tersebut, maka tambahkan 1. Misal file ada 500 dan kata "turu" muncul 100 di 500 dokumen tersebut, maka turu akan bernilai 100.
-                    for t in doc.1.keys() {
-                        if let Some(freq) = self.df.get_mut(t) {
-                            *freq += 1
-                        } else {
-                            self.df.insert(t.to_string(), 1);
-                        }
-                    }
-                    let document = Document::new(doc.1, doc.0, current_last_modified);
-
-                    return Some(document);
-                } else {
-                    None
-                }
-            }
-            DocumentState::STABLE => {
-                // println!(
-                //     "File {path} belum diupdate. Tidak di-index ulang.",
-                //     path = path.display()
-                // );
-                return None;
-            }
-            DocumentState::UPDATE => return self.update_document(&path, current_last_modified),
-        }
-    }
-    pub fn save_model_to_json_file(&mut self, path: &str) -> Result<(), ()> {
+    pub fn save_model_to_json_file(&self, path: &str) -> Result<(), ()> {
         // Save
         let index_file = File::create(&path).unwrap();
         println!("Saving data to {path}...");
         serde_json::to_writer(BufWriter::new(index_file), self)
             .map_err(|err| eprintln!("ERROR: Tidak dapat save file ke json : {err}"))
+    }
+}
+
+pub fn begin_index(model: &Mutex<Model>, path: PathBuf) -> CountCheck {
+    let mut counter = CountCheck::new();
+    if path.is_file() {
+        index_file(model, path, &mut counter);
+    } else {
+        index_folder(model, &path, &mut counter);
+    }
+    counter
+
+}
+fn index_folder(model: &Mutex<Model>, path: &PathBuf, counter: &mut CountCheck) {
+    let dir = fs::read_dir(&path).unwrap();
+    for entry in dir {
+        let path = entry.unwrap().path();
+
+        if path.is_dir() {
+            index_folder(model, &path, counter);
+        } else {
+            index_file(model, path, counter);
+        }
+    }
+}
+
+fn index_file(model: &Mutex<Model>, path: PathBuf, counter: &mut CountCheck) {
+    let current_last_modified = path.metadata().unwrap().modified().unwrap();
+    let mut model = model.lock().unwrap();
+    let document_state = model.check_document(&path, current_last_modified);
+
+    match document_state {
+        DocumentState::ADD => {
+            if let Some(doc) = calculate_document_by_extension(&path, current_last_modified) {
+                println!("Index: {:?} -> SELESAI", path);
+                // Kata-kata yang ada didokumen, jika ada kata tersebut, maka tambahkan 1. Misal file ada 500 dan kata "turu" muncul 100 di 500 dokumen tersebut, maka turu akan bernilai 100.
+                for t in doc.tf.keys() {
+                    if let Some(freq) = model.df.get_mut(t) {
+                        *freq += 1
+                    } else {
+                        model.df.insert(t.to_string(), 1);
+                    }
+                }
+                model.docs.insert(path, doc);
+                counter.add += 1;
+            } else {
+            }
+        }
+        DocumentState::STABLE => {
+            counter.stable += 1;
+            // println!(
+            //     "File {path} belum diupdate. Tidak di-index ulang.",
+            //     path = path.display()
+            // );
+        }
+        DocumentState::UPDATE => {
+            model.update_document(path, current_last_modified);
+            counter.update += 1;
+        },
     }
 }
 
@@ -170,7 +183,7 @@ fn table_and_count_term_freq(content: Vec<char>) -> (usize, TermFreq) {
 
     (total_count_term_in_doc, tf)
 }
-fn calculate_document_by_extension(path: &PathBuf) -> Option<(usize, HashMap<String, usize>)> {
+fn calculate_document_by_extension(path: &PathBuf, last_modified: SystemTime) -> Option<Doc> {
     match path.extension() {
         Some(ext) => {
             if ext == "xhtml" {
@@ -180,8 +193,8 @@ fn calculate_document_by_extension(path: &PathBuf) -> Option<(usize, HashMap<Str
                     .chars()
                     .collect::<Vec<_>>();
                 let result = table_and_count_term_freq(content);
-
-                return Some(result);
+                let document = Doc::new(result.1, result.0, last_modified);
+                return Some(document);
             } else {
                 None
             }
@@ -190,7 +203,7 @@ fn calculate_document_by_extension(path: &PathBuf) -> Option<(usize, HashMap<Str
     }
 }
 
-pub fn calculate_tf(t: &str, document: &Document) -> f32 {
+pub fn calculate_tf(t: &str, document: &Doc) -> f32 {
     let count_term_in_doc = document.tf.get(t).cloned().unwrap_or(0) as f32;
 
     count_term_in_doc / document.count as f32

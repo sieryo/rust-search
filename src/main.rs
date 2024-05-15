@@ -1,11 +1,10 @@
-use search_engine::model::Model;
+use search_engine::model::{Model, self};
 use search_engine::server::{self};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, sleep};
-use std::time::Duration;
 use std::{env, path::PathBuf, process::ExitCode};
 
 fn main() {
@@ -97,6 +96,7 @@ fn entry() -> Result<(), ()> {
         //     }
         // }
         "serve" => {
+            let mut is_loaded = false;
             let dir_path = args.next().ok_or_else(|| {
                 usage(&program);
                 eprintln!("ERROR: tidak ada directory yang diberi");
@@ -112,6 +112,7 @@ fn entry() -> Result<(), ()> {
             let model: Arc<Mutex<Model>>;
 
             if file_exist {
+                is_loaded = true;
                 let index_file = File::open(&index_path).map_err(|err| {
                     eprintln!("ERROR: Tidak ada index file : {err}");
                 })?;
@@ -128,10 +129,17 @@ fn entry() -> Result<(), ()> {
                 thread::spawn(move || {
                     // let mut model = model_copy1.lock().unwrap();
                     let model = Arc::clone(&model);
-                    let mut model = model.lock().unwrap();
-                    model.begin_index(PathBuf::from(&dir_path));
 
-                    // let _ = model.save_model_to_json_file(&index_path);
+                    let counter = model::begin_index(&model, PathBuf::from(&dir_path));
+
+                    let model = model.lock().unwrap();
+
+                    let _ = model.save_model_to_json_file(&index_path);
+                    println!("---------------");
+                    println!("Document ditambah: {}", counter.add);
+                    println!("Document didiamkan: {}", counter.stable);
+                    println!("Document diupdate: {}", counter.update);
+                    println!("---------------");
                     // Mulai server
                 });
             }
